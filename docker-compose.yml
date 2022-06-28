@@ -1,0 +1,36 @@
+version: '3.9'
+
+services:
+  api:
+    build: .
+    ports:
+      - 8000:8000
+    volumes:
+      - ./:/app
+    environment:
+      - DB_CONNECTION_STRING=postgresql+psycopg2://autoapi:autoapi@postgres:5432/autoapi
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      - postgres
+  postgres:
+    image: postgres:latest
+    ports:
+      - 5432:5432
+    environment:
+      - POSTGRES_USER=autoapi
+      - POSTGRES_PASSWORD=autoapi
+      - POSTGRES_DB=autoapi
+    volumes:
+      - postgres-db:/var/lib/postgresql/data
+      - ./postgres_init_scripts/:/docker-entrypoint-initdb.d/
+    healthcheck:
+      test: ["CMD", "pg_isready","-U", "hive", "metadata"]
+    restart: always
+
+volumes:
+  postgres-db:
