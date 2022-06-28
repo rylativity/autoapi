@@ -10,3 +10,4 @@ The API service expects an environment variable 'DB_CONNECTION_STRING' to be set
 
 ## ROADMAP
 - [x] Update util.py classes to use SQLAlchemy automap_base to map databases
+- [ ] Update readme with basic usage instructions
