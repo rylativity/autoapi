@@ -13,7 +13,9 @@ from sqlalchemy.orm import sessionmaker
 class SQLAlchemyDriver:
 
     def __init__(self, connection_string:str):
-        self.engine = create_engine(connection_string)
+        self.engine = create_engine(connection_string, pool_pre_ping=True)
+        with self.engine.connect(): # test the connection
+            pass
         self.sessionmaker = sessionmaker(self.engine)
     
     def query(self, query_string: str):

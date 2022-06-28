@@ -5,6 +5,8 @@ from typing import List, Optional, Union
 from fastapi import FastAPI, APIRouter, Request, Response
 from fastapi.logger import logger
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
+from time import sleep
 
 from util import ModelEndpointFactory, SQLAlchemyDriver
 
@@ -18,7 +20,17 @@ if __name__ != "main":
 else:
     logger.setLevel(logging.DEBUG)
 
-driver = SQLAlchemyDriver(DB_CONNECTION_STRING)
+success = False
+while not success:
+    try:
+        driver = SQLAlchemyDriver(DB_CONNECTION_STRING)
+        success = True
+        logger.info("Successfully connected to database... Preparing to initialize API...")
+        sleep(3)
+    except OperationalError:
+        logger.error("Could not connect to database... Reattempting connection...")
+        sleep(2)
+
 session: Session = driver.sessionmaker()
 
 routers = []
@@ -30,7 +42,7 @@ for config in ModelEndpointFactory(DB_CONNECTION_STRING).generate_endpoint_confi
 
     router = APIRouter(prefix=route)
     
-    @router.get("/", 
+    @router.get("", 
                 response_model=Union[List[pydantic_model], pydantic_model]
                 )
     def func(limit: Optional[int] = 10):
