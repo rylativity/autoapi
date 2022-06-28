@@ -15,6 +15,6 @@ CREATE TABLE IF NOT EXISTS table2 (
     double_field DOUBLE PRECISION
 );
 INSERT INTO table2 (bool_field, string_field, double_field)
-VALUES (TRUE, 'abc', 0.12),
-        (TRUE, 'def', 0.8),
-        (FALSE, 'ghi', 3.14159265358);
+VALUES (TRUE, 'mystring', 0.12),
+        (TRUE, 'my other string', 0.8),
+        (FALSE, 'yet another str', 3.14159265358);

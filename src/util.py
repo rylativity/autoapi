@@ -1,3 +1,4 @@
+from copy import deepcopy
 import logging
 import os
 from typing import List, Optional, Container, Type
@@ -13,7 +14,8 @@ from sqlalchemy.orm import sessionmaker
 class SQLAlchemyDriver:
 
     def __init__(self, connection_string:str):
-        self.engine = create_engine(connection_string, pool_pre_ping=True)
+        print(connection_string)
+        self.engine = create_engine(connection_string)
         with self.engine.connect(): # test the connection
             pass
         self.sessionmaker = sessionmaker(self.engine)
@@ -27,6 +29,9 @@ class SQLAlchemyDriver:
 class EndpointConfig:
     """ Simple Python object representing an endpoint configuration (url route, pydantic model, and sqlalchemy model) dynamically generated from a SQL table
     """
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__}>{self.to_dict()}"
 
     def __init__(self, route:str, pydantic_model: BaseModel, sqlalchemy_model = None) -> None:
         self.route=route
@@ -94,7 +99,11 @@ class ModelEndpointFactory:
                 route = f"/{table}"
             sqlalchemy_model = self.base.classes.get(name)
             pydantic_model = sqlalchemy_to_pydantic(sqlalchemy_model)
-            config = EndpointConfig(route = route, pydantic_model = pydantic_model, sqlalchemy_model=sqlalchemy_model)
+            config = EndpointConfig(route = route, pydantic_model = deepcopy(pydantic_model), sqlalchemy_model=deepcopy(sqlalchemy_model))
             endpoint_configs.append(config)
         return endpoint_configs
 
+if __name__ == "__main__":
+    endpoint_factory = ModelEndpointFactory(db_connection_string="postgresql+psycopg2://autoapi:autoapi@localhost:5432/autoapi")
+    configs = endpoint_factory.generate_endpoint_configs()
+    print(configs)
