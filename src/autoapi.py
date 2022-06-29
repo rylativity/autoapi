@@ -188,13 +188,13 @@ class AutoAPI:
         for cfg in endpoint_configs:
             for method in http_methods:
                 log.info(
-                    f"Creating API route {cfg.route} with Pydantic Model {cfg.pydantic_model} and SQLAlchemy Model {cfg.sqlalchemy_model}"
+                    f"Creating {method} API route {cfg.route} with Pydantic Model {cfg.pydantic_model} and SQLAlchemy Model {cfg.sqlalchemy_model}"
                 )
                 path_function = self.generate_api_path_function(
                     endpoint_config=cfg, router_or_app=router_or_app, http_method=method
                 )
                 api_path_functions.append(path_function)
-                log.info(f"Created {cfg.route}")
+                log.info(f"Created {method} {cfg.route}")
 
         return api_path_functions
 
