@@ -17,7 +17,7 @@ except IndexError:
 
 autoapi = AutoAPI(DB_CONNECTION_STRING)
 
-app = autoapi.create_api_app()
+app = autoapi.create_api_app(http_methods=["GET","POST"])
 
 # Alternative Instantiation and Usage
 # app = FastAPI(debug=DEBUG)

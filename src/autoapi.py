@@ -8,6 +8,7 @@ from pydantic import BaseConfig, BaseModel, create_model
 
 from sqlalchemy import create_engine
 from sqlalchemy.ext.automap import automap_base
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.inspection import inspect
 from sqlalchemy.orm.properties import ColumnProperty
 from sqlalchemy.orm import sessionmaker
@@ -133,6 +134,8 @@ class AutoAPI:
         router_or_app: Union[FastAPI, APIRouter],
         http_method: HTTPMethod = "GET",
     ) -> list:
+
+        session = self.driver.sessionmaker()
         if http_method not in [m.value for m in HTTPMethod]:
             raise ValueError("Param http_method must be one of ")
 
@@ -145,11 +148,33 @@ class AutoAPI:
                 ],
             )
             def auto_api_function(limit: Optional[int] = 10):
-                res = self.driver.sessionmaker().query(endpoint_config.sqlalchemy_model)
+                res = session.query(endpoint_config.sqlalchemy_model)
                 response = [row.__dict__ for row in res.limit(limit).all()]
                 return response
 
             return auto_api_function
+
+        elif http_method.upper() == HTTPMethod.POST.value:
+
+            @router_or_app.post(
+                endpoint_config.route,
+                response_model=endpoint_config.pydantic_model
+            )
+            def auto_api_function(obj:endpoint_config.pydantic_model):
+                sqlalchemy_obj = endpoint_config.sqlalchemy_model(**obj.__dict__)
+                try:
+                    session.add(sqlalchemy_obj)
+                    session.commit()
+                    return obj
+                except IntegrityError as e:
+                    session.rollback()
+                    info = e.orig.args
+                    try:
+                        msg = info[1]
+                    except IndexError:
+                        msg = info[0]
+                    log.error(msg)
+                    return Response(content=msg, status_code=400)
 
         else:
             raise Exception(f"Handler for HTTP method {http_method} not created yet")
@@ -173,10 +198,10 @@ class AutoAPI:
 
         return api_path_functions
 
-    def create_api_app(self):
+    def create_api_app(self, http_methods=["GET"]):
 
         app = FastAPI(debug=DEBUG)
-        self.generate_api_path_functions(router_or_app=app)
+        self.generate_api_path_functions(router_or_app=app, http_methods=http_methods)
 
         @app.get("/health")
         @app.get("/health/")
