@@ -39,5 +39,6 @@ SQL commands can be executed using the psql command line tool that is bundled in
 
 ## ROADMAP
 - [x] Update util.py classes to use SQLAlchemy automap_base to map databases
-- [x] Update readme with basic usage instructions
+- [ ] Update readme with basic usage instructions
+- [ ] Add class and method docstring
 - [ ] Add Create/Update/Delete routes
