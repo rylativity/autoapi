@@ -1,7 +1,9 @@
 from copy import deepcopy
-import logging
-import os
-from typing import List, Optional, Container, Type
+from enum import Enum
+from logconfig import log, DEBUG
+from multiprocessing.sharedctypes import Value
+from typing import List, Optional, Container, Type, Union
+from fastapi import APIRouter, FastAPI, Response
 
 from pydantic import BaseConfig, BaseModel, create_model
 
@@ -11,45 +13,27 @@ from sqlalchemy.inspection import inspect
 from sqlalchemy.orm.properties import ColumnProperty
 from sqlalchemy.orm import sessionmaker
 
-class SQLAlchemyDriver:
 
-    def __init__(self, connection_string:str):
+class SQLAlchemyDriver:
+    def __init__(self, connection_string: str):
         self.engine = create_engine(connection_string)
-        with self.engine.connect(): # test the connection
+        with self.engine.connect():  # test the connection
             pass
         self.sessionmaker = sessionmaker(self.engine)
-    
+
     def query(self, query_string: str):
         with self.engine.connect() as conn:
             result = conn.execute(query_string)
         return [dict(row) for row in result]
-    
 
-class EndpointConfig:
-    """ Simple Python object representing an endpoint configuration (url route, pydantic model, and sqlalchemy model) dynamically generated from a SQL table
-    """
-
-    def __repr__(self) -> str:
-        return f"<{self.__class__}>{self.to_dict()}"
-
-    def __init__(self, route:str, pydantic_model: BaseModel, sqlalchemy_model = None) -> None:
-        self.route=route
-        self.pydantic_model=pydantic_model
-        self.sqlalchemy_model=sqlalchemy_model
-
-    def to_dict(self):
-        return {
-            "route":self.route,
-            "pydantic_model":self.pydantic_model,
-            "sqlalchemy_model":self.sqlalchemy_model
-        }
 
 class OrmConfig(BaseConfig):
     orm_mode = True
 
+
 def sqlalchemy_to_pydantic(
-        db_model: Type, *, config: Type = OrmConfig, exclude: Container[str] = []
-    ) -> Type[BaseModel]:
+    db_model: Type, *, config: Type = OrmConfig, exclude: Container[str] = []
+) -> Type[BaseModel]:
     mapper = inspect(db_model)
     fields = {}
     for attr in mapper.attrs:
@@ -75,18 +59,56 @@ def sqlalchemy_to_pydantic(
     )
     return pydantic_model
 
-class ModelEndpointFactory:
 
-    log = logging.getLogger(__name__)
-    log.setLevel("INFO")
+### Helper Classes ###
+class EndpointConfig:
+    """Simple Python container object representing an endpoint configuration.
+    Holds an API path string, a Pydantic Model, and a SQLAlchemy Model
+    """
 
+    def __repr__(self) -> str:
+        return f"<{self.__class__}>{self.to_dict()}"
+
+    def __init__(
+        self, route: str, pydantic_model: BaseModel = None, sqlalchemy_model=None
+    ) -> None:
+        self.route = route
+        self.pydantic_model = pydantic_model
+        self.sqlalchemy_model = sqlalchemy_model
+
+    def to_dict(self):
+        return {
+            "route": self.route,
+            "pydantic_model": self.pydantic_model,
+            "sqlalchemy_model": self.sqlalchemy_model,
+        }
+
+
+class HTTPMethod(Enum):
+    GET = "GET"
+    PUT = "PUT"
+    POST = "POST"
+    PATCH = "PATCH"
+    DELETE = "DELETE"
+    OPTIONS = "OPTIONS"
+
+
+### End Helper Classes ###
+
+
+class AutoAPI:
     def __init__(self, db_connection_string: str) -> None:
         self.driver = SQLAlchemyDriver(db_connection_string)
         self.base = automap_base()
         self.base.prepare(autoload_with=self.driver.engine)
         self.base.metadata.reflect(bind=self.driver.engine)
 
-    def generate_endpoint_configs(self) -> List[EndpointConfig]:
+    def __generate_endpoint_configs(self) -> List[EndpointConfig]:
+        """Dynamically generate an EndpointConfig object for each table in the database
+
+        Returns:
+            List[EndpointConfig]: Returns a list of EndpointConfig objects.  Each object holds necessary atributes to generate a decorated API path function.
+        """
 
         endpoint_configs = []
         for name in list(self.base.metadata.tables.keys()):
@@ -98,11 +120,74 @@ class ModelEndpointFactory:
                 route = f"/{table}"
             sqlalchemy_model = self.base.classes.get(name)
             pydantic_model = sqlalchemy_to_pydantic(sqlalchemy_model)
-            config = EndpointConfig(route = route, pydantic_model = deepcopy(pydantic_model), sqlalchemy_model=deepcopy(sqlalchemy_model))
+            config = EndpointConfig(
+                route=route,
+                pydantic_model=deepcopy(pydantic_model),
+                sqlalchemy_model=deepcopy(sqlalchemy_model),
+            )
             endpoint_configs.append(config)
         return endpoint_configs
 
+    def generate_api_path_function(
+        self,
+        endpoint_config: EndpointConfig,
+        router_or_app: Union[FastAPI, APIRouter],
+        http_method: HTTPMethod = "GET",
+    ) -> list:
+        if http_method not in [m.value for m in HTTPMethod]:
+            raise ValueError("Param http_method must be one of ")
+
+        elif http_method.upper() == HTTPMethod.GET.value:
+
+            @router_or_app.get(
+                endpoint_config.route,
+                response_model=Union[
+                    List[endpoint_config.pydantic_model], endpoint_config.pydantic_model
+                ],
+            )
+            def auto_api_function(limit: Optional[int] = 10):
+                res = self.driver.sessionmaker().query(endpoint_config.sqlalchemy_model)
+                response = [row.__dict__ for row in res.limit(limit).all()]
+                return response
+
+            return auto_api_function
+
+        else:
+            raise Exception(f"Handler for HTTP method {http_method} not created yet")
+
+    def generate_api_path_functions(
+        self, router_or_app: Union[FastAPI, APIRouter], http_methods=["GET"]
+    ) -> list:
+        endpoint_configs = self.__generate_endpoint_configs()
+
+        api_path_functions = []
+        for cfg in endpoint_configs:
+            for method in http_methods:
+                log.info(
+                    f"Creating API route {cfg.route} with Pydantic Model {cfg.pydantic_model} and SQLAlchemy Model {cfg.sqlalchemy_model}"
+                )
+                path_function = self.generate_api_path_function(
+                    endpoint_config=cfg, router_or_app=router_or_app, http_method=method
+                )
+                api_path_functions.append(path_function)
+                log.info(f"Created {cfg.route}")
+
+        return api_path_functions
+
+    def create_api_app(self):
+
+        app = FastAPI(debug=DEBUG)
+        self.generate_api_path_functions(router_or_app=app)
+
+        @app.get("/health")
+        @app.get("/health/")
+        def healthcheck():
+            return Response(status_code=200)
+
+        return app
+
+
 if __name__ == "__main__":
-    endpoint_factory = ModelEndpointFactory(db_connection_string="postgresql+psycopg2://autoapi:autoapi@localhost:5432/autoapi")
-    configs = endpoint_factory.generate_endpoint_configs()
-    print(configs)
+    connection_string = "postgresql+psycopg2://autoapi:autoapi@localhost:5432/autoapi"
+    autoapi = AutoAPI(db_connection_string=connection_string)
+    app = autoapi.create_api_app()
