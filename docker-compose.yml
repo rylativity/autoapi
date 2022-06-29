@@ -1,7 +1,7 @@
 version: '3.9'
 
 services:
-  api:
+  autoapi:
     build: .
     ports:
       - 8000:8000
@@ -9,6 +9,7 @@ services:
       - ./:/app
     environment:
       - DB_CONNECTION_STRING=postgresql+psycopg2://autoapi:autoapi@postgres:5432/autoapi
+      - DEBUG=true
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s

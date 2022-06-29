@@ -14,7 +14,6 @@ from sqlalchemy.orm import sessionmaker
 class SQLAlchemyDriver:
 
     def __init__(self, connection_string:str):
-        print(connection_string)
         self.engine = create_engine(connection_string)
         with self.engine.connect(): # test the connection
             pass
