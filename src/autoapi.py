@@ -92,6 +92,10 @@ class HTTPMethod(Enum):
     DELETE = "DELETE"
     OPTIONS = "OPTIONS"
 
+    @staticmethod
+    def get_values():
+        return [m.value for m in HTTPMethod]
+
 
 ### End Helper Classes ###
 
@@ -136,8 +140,8 @@ class AutoAPI:
     ) -> list:
 
         session = self.driver.sessionmaker()
-        if http_method not in [m.value for m in HTTPMethod]:
-            raise ValueError("Param http_method must be one of ")
+        if http_method not in HTTPMethod.get_values():
+            raise ValueError(f"Param {http_method} is invalid. Must be one of {HTTPMethod.get_values()}")
 
         elif http_method.upper() == HTTPMethod.GET.value:
 
