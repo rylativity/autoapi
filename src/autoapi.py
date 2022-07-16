@@ -1,4 +1,3 @@
-from copy import deepcopy
 from enum import Enum
 from logconfig import log, DEBUG
 from typing import List, Optional, Container, Type, Union
@@ -6,7 +5,7 @@ from fastapi import APIRouter, FastAPI, Response
 
 from pydantic import BaseConfig, BaseModel, create_model
 
-from sqlalchemy import create_engine
+from sqlalchemy import Column, create_engine, Table
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.inspection import inspect
@@ -102,8 +101,27 @@ class AutoAPI:
         self.base = automap_base()
         self.base.prepare(autoload_with=self.driver.engine)
         self.base.metadata.reflect(bind=self.driver.engine)
+    
+    def _build_sqlalchemy_model(self, table_name:str) -> BaseModel:
 
-    def __generate_endpoint_configs(self) -> List[EndpointConfig]:
+        table: Table = self.base.metadata.tables.get(table_name)
+
+        #Dynamically create a sqlalchemy model class using the type() constructor
+        class_attrs = {
+            "__tablename__":table_name,
+            "__table_args__":{"extend_existing":True}
+        }
+        name:str
+        column:Column
+        for name, column in table.columns.items():
+            column.primary_key=True
+            class_attrs[name] = column
+        model_class: BaseModel = type(f"{table_name}_model", (BaseModel,), class_attrs)
+
+        # log.error(table.columns.items())
+        return model_class
+    
+    def _generate_endpoint_configs(self) -> List[EndpointConfig]:
         """Dynamically generate an EndpointConfig object for each table in the database
 
         Returns:
@@ -118,12 +136,16 @@ class AutoAPI:
                 route = f"/{schema}/{table}"
             else:
                 route = f"/{table}"
-            sqlalchemy_model = self.base.classes.get(name)
+            sqlalchemy_model: BaseModel = self.base.classes.get(name)
+            if not sqlalchemy_model:
+                # if the sqlalchemy_model cannot be retrieved through reflection (e.g. the table doesn't have a primary key)
+                # build the sqlalchemy_model using _build_sqlalchemy_model method
+                sqlalchemy_model = self._build_sqlalchemy_model(name)
             pydantic_model = sqlalchemy_to_pydantic(sqlalchemy_model)
             config = EndpointConfig(
                 route=route,
-                pydantic_model=deepcopy(pydantic_model),
-                sqlalchemy_model=deepcopy(sqlalchemy_model),
+                pydantic_model=pydantic_model,
+                sqlalchemy_model=sqlalchemy_model,
             )
             endpoint_configs.append(config)
         return endpoint_configs
@@ -182,7 +204,7 @@ class AutoAPI:
     def generate_api_path_functions(
         self, router_or_app: Union[FastAPI, APIRouter], http_methods=["GET"]
     ) -> list:
-        endpoint_configs = self.__generate_endpoint_configs()
+        endpoint_configs = self._generate_endpoint_configs()
 
         api_path_functions = []
         for cfg in endpoint_configs:
@@ -212,6 +234,7 @@ class AutoAPI:
 
 
 if __name__ == "__main__":
-    connection_string = "postgresql+psycopg2://autoapi:autoapi@localhost:5432/autoapi"
+    connection_string = "postgresql+psycopg2://autoapi:autoapi@localhost:5433/autoapi"
     autoapi = AutoAPI(db_connection_string=connection_string)
-    app = autoapi.create_api_app()
+    log.error(autoapi._build_sqlalchemy_model("table3"))
+    # app = autoapi.create_api_app()
