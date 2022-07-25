@@ -116,6 +116,10 @@ class AutoAPI:
 
         endpoint_configs = []
         for name in list(self.base.metadata.tables.keys()):
+
+            # Reinitialize variables for each loop
+            sqlalchemy_model, pydantic_model = None, None
+
             table = self.base.metadata.tables.get(name)
             schema = table.schema
             if schema is not None:
@@ -124,14 +128,15 @@ class AutoAPI:
                 route = f"/{table}"
             sqlalchemy_model = self.base.classes.get(name)
             if not sqlalchemy_model:
-                log.warn(f"Could not create model for table {table} with no primary key")
-            pydantic_model = sqlalchemy_to_pydantic(sqlalchemy_model)
-            config = EndpointConfig(
-                route=route,
-                pydantic_model=deepcopy(pydantic_model),
-                sqlalchemy_model=deepcopy(sqlalchemy_model),
-            )
-            endpoint_configs.append(config)
+                log.warn(f"Cannot create models for table {table}. Does table have a primary key?")
+            else:
+                pydantic_model = sqlalchemy_to_pydantic(sqlalchemy_model)
+                config = EndpointConfig(
+                    route=route,
+                    pydantic_model=deepcopy(pydantic_model),
+                    sqlalchemy_model=deepcopy(sqlalchemy_model),
+                )
+                endpoint_configs.append(config)
         return endpoint_configs
 
     def generate_api_path_function(
@@ -192,9 +197,12 @@ class AutoAPI:
 
         api_path_functions = []
         for cfg in endpoint_configs:
+            route = cfg.route
+            pydantic_model = cfg.pydantic_model
+            sqlalchemy_model = cfg.sqlalchemy_model
             for method in http_methods:
                 log.info(
-                    f"Creating {method} API route {cfg.route} with Pydantic Model {cfg.pydantic_model} and SQLAlchemy Model {cfg.sqlalchemy_model}"
+                    f"Creating {method} API route {route} with Pydantic Model {pydantic_model} and SQLAlchemy Model {sqlalchemy_model}"
                 )
                 path_function = self.generate_api_path_function(
                     endpoint_config=cfg, router_or_app=router_or_app, http_method=method
