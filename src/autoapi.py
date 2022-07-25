@@ -123,6 +123,8 @@ class AutoAPI:
             else:
                 route = f"/{table}"
             sqlalchemy_model = self.base.classes.get(name)
+            if not sqlalchemy_model:
+                log.warn(f"Could not create model for table {table} with no primary key")
             pydantic_model = sqlalchemy_to_pydantic(sqlalchemy_model)
             config = EndpointConfig(
                 route=route,
