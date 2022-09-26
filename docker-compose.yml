@@ -1,14 +1,17 @@
 version: '3.9'
 
 services:
-  autoapi:
+  trinoautoapi:
     build: .
+    image: rms113/trinoautoapi:0.0.1
     ports:
       - 8000:8000
     volumes:
       - ./:/app
     environment:
-      - DB_CONNECTION_STRING=postgresql+psycopg2://autoapi:autoapi@postgres:5432/autoapi
+      - TRINO_HOST=trino
+      - TRINO_PORT=8080
+      - TRINO_USER=trino
       - DEBUG=true
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -16,22 +19,26 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    depends_on:
-      - postgres
-  postgres:
-    image: postgres:latest
-    ports:
-      - 5432:5432
-    environment:
-      - POSTGRES_USER=autoapi
-      - POSTGRES_PASSWORD=autoapi
-      - POSTGRES_DB=autoapi
-    volumes:
-      - postgres-db:/var/lib/postgresql/data
-      - ./postgres_init_scripts/:/docker-entrypoint-initdb.d/
-    healthcheck:
-      test: ["CMD", "pg_isready","-U", "hive", "metadata"]
-    restart: always
+    # depends_on:
+    #   - postgres
+  # postgres:
+  #   image: postgres:latest
+  #   ports:
+  #     - 5432:5432
+  #   environment:
+  #     - POSTGRES_USER=autoapi
+  #     - POSTGRES_PASSWORD=autoapi
+  #     - POSTGRES_DB=autoapi
+  #   # volumes:
+  #   #   - postgres-db:/var/lib/postgresql/data
+  #   #   - ./postgres_init_scripts/:/docker-entrypoint-initdb.d/
+  #   healthcheck:
+  #     test: ["CMD", "pg_isready","-U", "hive", "metadata"]
+  #   restart: always
 
-volumes:
-  postgres-db:
+# volumes:
+#   postgres-db:
+networks:
+  default:
+    name: container-analytics-platform
+    external: true
