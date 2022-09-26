@@ -38,7 +38,7 @@ services:
 
 # volumes:
 #   postgres-db:
-networks:
-  default:
-    name: container-analytics-platform
-    external: true
+# networks:
+#   default:
+#     name: container-analytics-platform
+#     external: true
