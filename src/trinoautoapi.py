@@ -1,4 +1,5 @@
 from enum import Enum
+from time import sleep
 from typing import List, Optional, Union
 
 from fastapi import APIRouter, FastAPI, Response
@@ -51,7 +52,7 @@ class TrinoAutoApi:
             log.info(f"Using default hostname '{host}")
         if user is None:
             user = "trino"
-            log.info(f"Using default username '{username}")
+            log.info(f"Using default username '{user}")
         if port is None:
             port = 8080
             log.info(f"Using default port '{port}")
@@ -61,7 +62,7 @@ class TrinoAutoApi:
             "user":user,
             "port":str(port)
         }
-        log.info(f"Connecting to Trino. Connection info: {conn_info}")
+        log.info(f"Attempting to connect to Trino. Connection info: {conn_info}")
         if password is not None:
             conn_info["password"] = password
             log.info(f"Password set - {''.join(['x' for letter in password])}")
@@ -69,16 +70,28 @@ class TrinoAutoApi:
             log.info("No password set...")
         
         self.conn_info = conn_info
-        self.trino_conn = connect(**conn_info)
-        
-        cur = self.trino_conn.cursor()
-        # Query runtime nodes to test connection
-        cur.execute("SELECT * FROM system.runtime.nodes")
-        rows = cur.fetchall()
-        field_names = [d[0] for d in cur.description]
+        connected = False
+        while not connected:
+            try:
+                self.trino_conn = connect(**conn_info)
+                cur = self.trino_conn.cursor()
+                # Query runtime nodes to test connection
+                cur.execute("SELECT * FROM system.runtime.nodes")
+                rows = cur.fetchall()
+                field_names = [d[0] for d in cur.description]
 
-        self.node_info = [dict(zip(field_names, row)) for row in rows]
-        log.info(f"Nodes Discovered: {self.node_info}")
+                self.node_info = [dict(zip(field_names, row)) for row in rows]
+                log.info(f"Nodes Discovered: {self.node_info}")
+                connected = True
+            
+            except Exception as e:
+                log.error(e)
+                log.info("Attempting to reconnect in 5 seconds")
+                sleep(5)
+                
+
+        
+        
     
     def get_catalog_names(self, exclude = ['jmx', 'memory', 'system', 'tpcds', 'tpch']):
 
@@ -175,6 +188,13 @@ class TrinoAutoApi:
                     List[endpoint_config.pydantic_model], endpoint_config.pydantic_model
                 ],
             )
+            @router_or_app.get(
+                endpoint_config.route + "/",
+                response_model=Union[
+                    List[endpoint_config.pydantic_model], endpoint_config.pydantic_model
+                ],
+                include_in_schema=False
+            )
             def auto_api_function(limit: Optional[int] = None):
 
                 if limit is None:
@@ -218,7 +238,7 @@ class TrinoAutoApi:
         self.generate_api_path_functions(router_or_app=app, http_methods=http_methods)
 
         @app.get("/health")
-        @app.get("/health/")
+        @app.get("/health/", include_in_schema=False)
         def healthcheck():
             return Response(status_code=200)
 
