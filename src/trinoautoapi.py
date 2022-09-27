@@ -1,10 +1,12 @@
 from enum import Enum
 from time import sleep
 from typing import List, Optional, Union
+from venv import create
 
 from fastapi import APIRouter, FastAPI, Response
-from trino.dbapi import connect
-from trino.exceptions import TrinoExternalError
+from sqlalchemy import create_engine, inspect, types
+from sqlalchemy.schema import Table, MetaData
+from sqlalchemy.sql.expression import select
 from pydantic import create_model, BaseModel
 
 from logconfig import log, DEBUG
@@ -70,76 +72,78 @@ class TrinoAutoApi:
             log.info("No password set...")
         
         self.conn_info = conn_info
-        connected = False
-        while not connected:
-            try:
-                self.trino_conn = connect(**conn_info)
-                cur = self.trino_conn.cursor()
-                # Query runtime nodes to test connection
-                cur.execute("SELECT * FROM system.runtime.nodes")
-                rows = cur.fetchall()
-                field_names = [d[0] for d in cur.description]
 
-                self.node_info = [dict(zip(field_names, row)) for row in rows]
-                log.info(f"Nodes Discovered: {self.node_info}")
-                connected = True
-            
-            except Exception as e:
-                log.error(e)
-                log.info("Attempting to reconnect in 5 seconds")
-                sleep(5)
-                
+        if password is None:
+            self.base_connection_string = f"trino://{user}@{host}:{port}"
+        else:
+            self.base_connection_string = f"trino://{user}:{password}@{host}:{port}" 
 
-        
-        
+        self.engines = {} # Initialize empty dict to hold SQLAlchemy Engines. Will have one per connection  
     
     def get_catalog_names(self, exclude = ['jmx', 'memory', 'system', 'tpcds', 'tpch']):
 
-        cur = self.trino_conn.cursor()
-        cur.execute("SHOW CATALOGS")
+        engine = create_engine(self.base_connection_string)
+        self.engines["base"] = engine
+        
+        conn = engine.connect()
+        cur = conn.execute("SHOW CATALOGS")
         rows = cur.fetchall()
         catalogs = [row[0] for row in rows if row[0] not in exclude]
+        conn.close()
         
         return catalogs
     
     def get_schema_names(self, catalog, exclude=['default','information_schema']):
-    
-        cur = self.trino_conn.cursor()
-        cur.execute(f"SHOW SCHEMAS IN {catalog}")
-        rows = cur.fetchall()
-        schemas = [row[0] for row in rows if row[0] not in exclude]
+        
+        engine = self.engines.get(catalog)
+        if engine is None:
+            engine = create_engine(self.base_connection_string + f"/{catalog}")
+        insp = inspect(engine)
+        schemas = insp.get_schema_names()
+        schemas = [schema for schema in schemas if schema not in exclude]
         return schemas
     
     def get_tables(self, catalog, schema, exclude=[]):
-        cur = self.trino_conn.cursor()
-        cur.execute(f"SHOW TABLES IN {catalog}.{schema}")
-        rows = cur.fetchall()
-        tables = [row[0] for row in rows if row[0] not in exclude]
+        
+        engine = self.engines.get(catalog)
+        if engine is None:
+            engine = create_engine(self.base_connection_string + f"/{catalog}")
+        insp = inspect(engine)
+        tables = insp.get_table_names(schema)
+        tables = [table for table in tables if table not in exclude]
         return tables
     
-    def describe_table(self, catalog, schema, table):
-        cur = self.trino_conn.cursor()
-        cur.execute(f"DESCRIBE {catalog}.{schema}.{table}")
-        rows = cur.fetchall()
-        table_desc = dict(zip([row[0] for row in rows], [row[1] for row in rows]))
-        return table_desc
+    def get_columns(self, catalog, schema, table):
+        
+        engine = self.engines.get(catalog)
+        if engine is None:
+            engine = create_engine(self.base_connection_string + f"/{catalog}")
+        insp = inspect(engine)
+        columns = insp.get_columns(schema=schema, table_name=table)
+        return columns
     
     def pydantic_from_table(self, catalog, schema, table):
         
-        table_desc = self.describe_table(catalog,schema, table)
+        columns = self.get_columns(catalog,schema, table)
         
         model_dict = {}
         
-        for col_name, trino_type in table_desc.items():
+        for col in columns:
+
+            col_name = col["name"]
+            col_type = col["type"]
             
-            if trino_type == 'varchar':
+            
+            if isinstance(col_type, types.String):
                 model_dict[col_name] = (Optional[str],...)
-            elif trino_type == 'double':
+            elif isinstance(col_type, types.Float):
                 model_dict[col_name] = (Optional[float],...)
-            elif trino_type == 'integer':
+            elif isinstance(col_type, types.Integer):
                 model_dict[col_name] = (Optional[int],...)
+            elif isinstance(col_type, types.Boolean):
+                model_dict[col_name] = (Optional[bool],...)
             else:
-                raise Exception(f"No handler for column {col_name} with type {trino_type}")
+                raise Exception(f"No handler for column {col_name} with type {col_type}")
         
         model_name = f"{schema}_{table}"
         
@@ -167,9 +171,9 @@ class TrinoAutoApi:
                             pydantic_model = pydantic_model
                         )
                         endpoint_configs.append(endpoint_config)
-                    except TrinoExternalError as e:
-                        if e.error_name == "UNSUPPORTED_TABLE_TYPE":
-                            log.error(f"Cannot create pydantic model for table {catalog}.{schema}.{table}.")
+                    except Exception as e:
+                        log.error(f"Cannot create pydantic model for table {catalog}.{schema}.{table}.")
+                        log.error(e)
         
         return endpoint_configs
     
@@ -195,15 +199,29 @@ class TrinoAutoApi:
                 ],
                 include_in_schema=False
             )
-            def auto_api_function(limit: Optional[int] = None):
+            def auto_api_function(limit: Optional[int] = 10):
 
+                catalog, schema, table = endpoint_config.route.strip("/").split("/")
+                
+                engine = self.engines.get(catalog)
+                if engine is None:
+                    engine = create_engine(self.base_connection_string + f"/{catalog}")
                 if limit is None:
                     limit = 10
-                sql_table_name = endpoint_config.route.strip("/").replace("/",".")
-                cur = self.trino_conn.cursor()
-                rows = cur.execute(f"SELECT * FROM {sql_table_name} LIMIT {limit}")
-                col_names = [d[0] for d in cur.description]
+                
+                table = Table(
+                    table,
+                    MetaData(schema=schema),
+                    autoload=True,
+                    autoload_with=engine
+                )
+
+                conn = engine.connect()
+                cursor = conn.execute(select(table))
+                rows = cursor.fetchmany(limit)
+                col_names = list(cursor.keys())
                 response = [dict(zip(col_names, row)) for row in rows]
+                conn.close()
                 return response
 
             return auto_api_function
