@@ -1,9 +1,9 @@
 version: '3.9'
 
 services:
-  trinoautoapi:
+  autoapi:
     build: .
-    image: rms113/trinoautoapi:0.0.2
+    image: rms113/autoapi:0.0.3
     ports:
       - 8000:8000
     volumes:
