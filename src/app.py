@@ -1,18 +1,19 @@
 import os
 
-from trinoautoapi import TrinoAutoApi
+from autoapi import AutoApi
 from logconfig import log
 
-TRINO_HOST = os.environ.get("TRINO_HOST")
-TRINO_USER = os.environ.get("TRINO_USER")
-TRINO_PORT = os.environ.get("TRINO_PORT")
+DB_HOST = os.environ.get("DB_HOST")
+DB_USER = os.environ.get("DB_USER")
+DB_PORT = os.environ.get("DB_PORT")
+DB_DIALECT = os.environ.get("DB_DIALECT")
 
-for var in [TRINO_HOST, TRINO_USER, TRINO_PORT]:
+for var in [DB_HOST, DB_USER, DB_PORT]:
     if var is None:
-        log.warn(f"No value set for environment variable ${var}...")
+        log.error(f"No value set for environment variable ${var}...")
         log.warn(f"Will fall back to default value for {var}")
 
-trino_autoapi = TrinoAutoApi(host=TRINO_HOST, user=TRINO_USER, port=TRINO_PORT)
+trino_autoapi = AutoApi(host=DB_HOST, user=DB_USER, port=DB_PORT, dialect=DB_DIALECT)
 
 app = trino_autoapi.create_api_app(http_methods=["GET"])
 

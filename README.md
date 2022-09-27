@@ -37,10 +37,21 @@ SQL commands can be executed using the psql command line tool that is bundled in
  docker-compose exec postgres psql -U autoapi -c "$(cat ./<YOUR_SCRIPT>.sql)"
  ```
 
+ ## Supported Databases
+
+The following databases are currently supported, but more will be added:
+- Trino
+
+Adding support for a new database is simply a matter of adding the required SQLAlchemy requirements for the given database to the requirements.txt and adding a "get_db_statement" for the given dialect in the "get_database_names" method in the autoapi.AutoApi class.
+
 ## ROADMAP
-- [x] Update util.py classes to use SQLAlchemy automap_base to map databases
+- [ ] Restore Postgres Examples
+- [ ] Add support for additional databases
+    - [ ] Add check for supported dialect
+    - [ ] Add SQL statements for listing databases in autoapi.py
 - [ ] Update readme with basic usage instructions
 - [ ] Implement config/model saving
 - [ ] Implement authorization
 - [ ] Add class and method docstring
 - [ ] Add Create/Update/Delete routes
+- [ ] Add pagination
