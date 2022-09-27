@@ -1,66 +1,15 @@
-from copy import deepcopy
 from enum import Enum
-from logconfig import log, DEBUG
-from typing import List, Optional, Container, Type, Union
+from typing import List, Optional, Union
+
 from fastapi import APIRouter, FastAPI, Response
+from sqlalchemy import create_engine, inspect, types
+from sqlalchemy.schema import Table, MetaData
+from sqlalchemy.sql.expression import select
+from pydantic import create_model, BaseModel
 
-from pydantic import BaseConfig, BaseModel, create_model
+from logconfig import log, DEBUG
 
-from sqlalchemy import create_engine
-from sqlalchemy.ext.automap import automap_base
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.inspection import inspect
-from sqlalchemy.orm.properties import ColumnProperty
-from sqlalchemy.orm import sessionmaker
-
-
-class SQLAlchemyDriver:
-    def __init__(self, connection_string: str):
-        self.engine = create_engine(connection_string)
-        with self.engine.connect():  # test the connection
-            pass
-        self.sessionmaker = sessionmaker(self.engine)
-
-    def query(self, query_string: str):
-        with self.engine.connect() as conn:
-            result = conn.execute(query_string)
-        return [dict(row) for row in result]
-
-
-class OrmConfig(BaseConfig):
-    orm_mode = True
-
-
-def sqlalchemy_to_pydantic(
-    db_model: Type, *, config: Type = OrmConfig, exclude: Container[str] = []
-) -> Type[BaseModel]:
-    mapper = inspect(db_model)
-    fields = {}
-    for attr in mapper.attrs:
-        if isinstance(attr, ColumnProperty):
-            if attr.columns:
-                name = attr.key
-                if name in exclude:
-                    continue
-                column = attr.columns[0]
-                python_type: Optional[type] = None
-                if hasattr(column.type, "impl"):
-                    if hasattr(column.type.impl, "python_type"):
-                        python_type = column.type.impl.python_type
-                elif hasattr(column.type, "python_type"):
-                    python_type = column.type.python_type
-                assert python_type, f"Could not infer python_type for {column}"
-                default = None
-                if column.default is None and not column.nullable:
-                    default = ...
-                fields[name] = (python_type, default)
-    pydantic_model = create_model(
-        db_model.__name__, __config__=config, **fields  # type: ignore
-    )
-    return pydantic_model
-
-
-### Helper Classes ###
+### Helper Classes and Functions ###
 class EndpointConfig:
     """Simple Python container object representing an endpoint configuration.
     Holds an API path string, a Pydantic Model, and a SQLAlchemy Model
@@ -70,75 +19,160 @@ class EndpointConfig:
         return f"<{self.__class__}>{self.to_dict()}"
 
     def __init__(
-        self, route: str, pydantic_model: BaseModel = None, sqlalchemy_model=None
+        self, route: str, pydantic_model: BaseModel = None
     ) -> None:
         self.route = route
         self.pydantic_model = pydantic_model
-        self.sqlalchemy_model = sqlalchemy_model
 
     def to_dict(self):
         return {
             "route": self.route,
             "pydantic_model": self.pydantic_model,
-            "sqlalchemy_model": self.sqlalchemy_model,
         }
-
 
 class HTTPMethod(Enum):
     GET = "GET"
-    PUT = "PUT"
-    POST = "POST"
-    PATCH = "PATCH"
-    DELETE = "DELETE"
-    OPTIONS = "OPTIONS"
+    # PUT = "PUT"
+    # POST = "POST"
+    # PATCH = "PATCH"
+    # DELETE = "DELETE"
+    # OPTIONS = "OPTIONS"
 
     @staticmethod
     def get_values():
         return [m.value for m in HTTPMethod]
+### END Helper Classes and Functions ###
 
+class AutoApi:
 
-### End Helper Classes ###
+    def __init__(self, host, user, port, dialect, password=None):
 
+        conn_info = {
+            "host":host,
+            "user":user,
+            "port":str(port),
+            "dialect":dialect
+        }
+        log.info(f"Attempting to connect to database. Connection info: {conn_info}")
+        if password is not None:
+            conn_info["password"] = password
+            log.info(f"Password set - {''.join(['x' for letter in password])}")
+        else:
+            log.info("No password set...")
+        
+        self.conn_info = conn_info
 
-class AutoAPI:
-    def __init__(self, db_connection_string: str) -> None:
-        self.driver = SQLAlchemyDriver(db_connection_string)
-        self.base = automap_base()
-        self.base.prepare(autoload_with=self.driver.engine)
-        self.base.metadata.reflect(bind=self.driver.engine)
+        if password is None:
+            self.base_connection_string = f"{dialect}://{user}@{host}:{port}"
+        else:
+            self.base_connection_string = f"{dialect}://{user}:{password}@{host}:{port}" 
 
-    def __generate_endpoint_configs(self) -> List[EndpointConfig]:
-        """Dynamically generate an EndpointConfig object for each table in the database
+        self.engines = {} # Initialize empty dict to hold SQLAlchemy Engines. Will have one per connection  
+    
+    def get_database_names(self, exclude = ['jmx', 'memory', 'system', 'tpcds', 'tpch']): # database is referred to as "catalog" in trino
 
-        Returns:
-            List[EndpointConfig]: Returns a list of EndpointConfig objects.  Each object holds necessary atributes to generate a decorated API path function.
-        """
+        engine = create_engine(self.base_connection_string)
+        self.engines["base"] = engine
+
+        dialect = engine.dialect.name.lower()
+        
+        if dialect in ["trino"]:
+            get_db_statement = "SHOW CATALOGS"
+        else:
+            raise Exception(f"Dialect {dialect} not yet supported. A SQL statement to fetch available databases must be added")
+        
+        conn = engine.connect()
+        cur = conn.execute(get_db_statement)
+        rows = cur.fetchall()
+        catalogs = [row[0] for row in rows if row[0] not in exclude]
+        conn.close()
+        
+        return catalogs
+    
+    def get_schema_names(self, catalog, exclude=['default','information_schema']):
+        
+        engine = self.engines.get(catalog)
+        if engine is None:
+            engine = create_engine(self.base_connection_string + f"/{catalog}")
+        insp = inspect(engine)
+        schemas = insp.get_schema_names()
+        schemas = [schema for schema in schemas if schema not in exclude]
+        return schemas
+    
+    def get_tables(self, catalog, schema, exclude=[]):
+        
+        engine = self.engines.get(catalog)
+        if engine is None:
+            engine = create_engine(self.base_connection_string + f"/{catalog}")
+        insp = inspect(engine)
+        tables = insp.get_table_names(schema)
+        tables = [table for table in tables if table not in exclude]
+        return tables
+    
+    def get_columns(self, catalog, schema, table):
+        
+        engine = self.engines.get(catalog)
+        if engine is None:
+            engine = create_engine(self.base_connection_string + f"/{catalog}")
+        insp = inspect(engine)
+        columns = insp.get_columns(schema=schema, table_name=table)
+        return columns
+    
+    def pydantic_from_table(self, catalog, schema, table):
+        
+        columns = self.get_columns(catalog,schema, table)
+        
+        model_dict = {}
+        
+        for col in columns:
+
+            col_name = col["name"]
+            col_type = col["type"]
+            
+            
+            if isinstance(col_type, types.String):
+                model_dict[col_name] = (Optional[str],...)
+            elif isinstance(col_type, types.Float):
+                model_dict[col_name] = (Optional[float],...)
+            elif isinstance(col_type, types.Integer):
+                model_dict[col_name] = (Optional[int],...)
+            elif isinstance(col_type, types.Boolean):
+                model_dict[col_name] = (Optional[bool],...)
+            else:
+                raise Exception(f"No handler for column {col_name} with type {col_type}")
+        
+        model_name = f"{schema}_{table}"
+        
+        model = create_model(model_name, **model_dict)
+        
+        return model
+
+    def __generate_endpoint_configs(self):
 
         endpoint_configs = []
-        for name in list(self.base.metadata.tables.keys()):
 
-            # Reinitialize variables for each loop
-            sqlalchemy_model, pydantic_model = None, None
+        catalogs = self.get_database_names()
 
-            table = self.base.metadata.tables.get(name)
-            schema = table.schema
-            if schema is not None:
-                route = f"/{schema}/{table}"
-            else:
-                route = f"/{table}"
-            sqlalchemy_model = self.base.classes.get(name)
-            if not sqlalchemy_model:
-                log.warn(f"Cannot create models for table {table}. Does table have a primary key?")
-            else:
-                pydantic_model = sqlalchemy_to_pydantic(sqlalchemy_model)
-                config = EndpointConfig(
-                    route=route,
-                    pydantic_model=deepcopy(pydantic_model),
-                    sqlalchemy_model=deepcopy(sqlalchemy_model),
-                )
-                endpoint_configs.append(config)
+        for catalog in catalogs:
+            schemas = self.get_schema_names(catalog)
+
+            for schema in schemas:
+                tables = self.get_tables(catalog, schema)
+
+                for table in tables:
+                    try:
+                        pydantic_model = self.pydantic_from_table(catalog, schema, table)
+                        endpoint_config = EndpointConfig(
+                            route = f"/{catalog}/{schema}/{table}",
+                            pydantic_model = pydantic_model
+                        )
+                        endpoint_configs.append(endpoint_config)
+                    except Exception as e:
+                        log.error(f"Cannot create pydantic model for table {catalog}.{schema}.{table}.")
+                        log.error(e)
+        
         return endpoint_configs
-
+    
     def generate_api_path_function(
         self,
         endpoint_config: EndpointConfig,
@@ -146,11 +180,7 @@ class AutoAPI:
         http_method: HTTPMethod = "GET",
     ) -> list:
 
-        session = self.driver.sessionmaker()
-        if http_method not in HTTPMethod.get_values():
-            raise ValueError(f"Param {http_method} is invalid. Must be one of {HTTPMethod.get_values()}")
-
-        elif http_method.upper() == HTTPMethod.GET.value:
+        if http_method.upper() == HTTPMethod.GET.value:
 
             @router_or_app.get(
                 endpoint_config.route,
@@ -158,38 +188,40 @@ class AutoAPI:
                     List[endpoint_config.pydantic_model], endpoint_config.pydantic_model
                 ],
             )
+            @router_or_app.get(
+                endpoint_config.route + "/",
+                response_model=Union[
+                    List[endpoint_config.pydantic_model], endpoint_config.pydantic_model
+                ],
+                include_in_schema=False
+            )
             def auto_api_function(limit: Optional[int] = 10):
-                res = session.query(endpoint_config.sqlalchemy_model)
-                response = [row.__dict__ for row in res.limit(limit).all()]
+
+                catalog, schema, table = endpoint_config.route.strip("/").split("/")
+                
+                engine = self.engines.get(catalog)
+                if engine is None:
+                    engine = create_engine(self.base_connection_string + f"/{catalog}")
+                if limit is None:
+                    limit = 10
+                
+                table = Table(
+                    table,
+                    MetaData(schema=schema),
+                    autoload=True,
+                    autoload_with=engine
+                )
+
+                conn = engine.connect()
+                cursor = conn.execute(select(table))
+                rows = cursor.fetchmany(limit)
+                col_names = list(cursor.keys())
+                response = [dict(zip(col_names, row)) for row in rows]
+                conn.close()
                 return response
 
             return auto_api_function
-
-        elif http_method.upper() == HTTPMethod.POST.value:
-
-            @router_or_app.post(
-                endpoint_config.route,
-                response_model=endpoint_config.pydantic_model
-            )
-            def auto_api_function(obj:endpoint_config.pydantic_model):
-                sqlalchemy_obj = endpoint_config.sqlalchemy_model(**obj.__dict__)
-                try:
-                    session.add(sqlalchemy_obj)
-                    session.commit()
-                    return obj
-                except IntegrityError as e:
-                    session.rollback()
-                    info = e.orig.args
-                    try:
-                        msg = info[1]
-                    except IndexError:
-                        msg = info[0]
-                    log.error(msg)
-                    return Response(content=msg, status_code=400)
-
-        else:
-            raise Exception(f"Handler for HTTP method {http_method} not created yet")
-
+                    
     def generate_api_path_functions(
         self, router_or_app: Union[FastAPI, APIRouter], http_methods=["GET"]
     ) -> list:
@@ -199,10 +231,12 @@ class AutoAPI:
         for cfg in endpoint_configs:
             route = cfg.route
             pydantic_model = cfg.pydantic_model
-            sqlalchemy_model = cfg.sqlalchemy_model
             for method in http_methods:
+                if method not in HTTPMethod.get_values():
+                    log.error(f"HTTP Method {method} not supported. Skipping path function creation")
+                    continue
                 log.info(
-                    f"Creating {method} API route {route} with Pydantic Model {pydantic_model} and SQLAlchemy Model {sqlalchemy_model}"
+                    f"Creating {method} API route {route} with Pydantic Model {pydantic_model}"
                 )
                 path_function = self.generate_api_path_function(
                     endpoint_config=cfg, router_or_app=router_or_app, http_method=method
@@ -212,20 +246,14 @@ class AutoAPI:
 
         return api_path_functions
 
-    def create_api_app(self, http_methods=["GET"]):
-
+    def create_api_app(self, http_methods = ["GET"]):
+        
         app = FastAPI(debug=DEBUG)
         self.generate_api_path_functions(router_or_app=app, http_methods=http_methods)
 
         @app.get("/health")
-        @app.get("/health/")
+        @app.get("/health/", include_in_schema=False)
         def healthcheck():
             return Response(status_code=200)
 
         return app
-
-
-if __name__ == "__main__":
-    connection_string = "postgresql+psycopg2://autoapi:autoapi@localhost:5432/autoapi"
-    autoapi = AutoAPI(db_connection_string=connection_string)
-    app = autoapi.create_api_app()
