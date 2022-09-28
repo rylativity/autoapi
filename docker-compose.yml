@@ -3,42 +3,43 @@ version: '3.9'
 services:
   autoapi:
     build: .
-    image: rms113/autoapi:0.0.3
+    image: rms113/autoapi:0.0.4
     ports:
       - 8000:8000
     volumes:
       - ./src/:/app/src/
     environment:
-      - DB_HOST=trino
-      - DB_PORT=8080
-      - DB_USER=trino
-      - DB_DIALECT=trino
+      - SQLALCHEMY_URIS=postgresql://autoapi:autoapi@postgres #,trino://trino@trino:8080
       - DEBUG=true
+      # - DB_HOST=postgres
+      # - DB_PORT=5432
+      # - DB_USER=autoapi
+      # - DB_DIALECT=postgresql
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 10s
-    # depends_on:
-    #   - postgres
-  # postgres:
-  #   image: postgres:latest
-  #   ports:
-  #     - 5432:5432
-  #   environment:
-  #     - POSTGRES_USER=autoapi
-  #     - POSTGRES_PASSWORD=autoapi
-  #     - POSTGRES_DB=autoapi
-  #   # volumes:
-  #   #   - postgres-db:/var/lib/postgresql/data
-  #   #   - ./postgres_init_scripts/:/docker-entrypoint-initdb.d/
-  #   healthcheck:
-  #     test: ["CMD", "pg_isready","-U", "hive", "metadata"]
-  #   restart: always
+    depends_on:
+      - postgres
+  postgres:
+    image: postgres:14
+    ports:
+      - 5433:5432
+    environment:
+      - POSTGRES_USER=autoapi
+      - POSTGRES_PASSWORD=autoapi
+      - POSTGRES_DB=autoapi
+    volumes:
+      - postgres-db:/var/lib/postgresql/data
+      - ./postgres_init_scripts/:/docker-entrypoint-initdb.d/
+    healthcheck:
+      test: ["CMD", "pg_isready","-U", "autoapi", "autoapi"]
+    restart: always
 
-# volumes:
-#   postgres-db:
+volumes:
+  postgres-db:
 # networks:
 #   default:
 #     name: container-analytics-platform

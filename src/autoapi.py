@@ -3,6 +3,7 @@ from typing import List, Optional, Union
 
 from fastapi import APIRouter, FastAPI, Response
 from sqlalchemy import create_engine, inspect, types
+from sqlalchemy.engine import make_url, URL
 from sqlalchemy.schema import Table, MetaData
 from sqlalchemy.sql.expression import select
 from pydantic import create_model, BaseModel
@@ -19,15 +20,17 @@ class EndpointConfig:
         return f"<{self.__class__}>{self.to_dict()}"
 
     def __init__(
-        self, route: str, pydantic_model: BaseModel = None
+        self, route: str, pydantic_model: BaseModel, sqlalchemy_uri: Union[str, URL]
     ) -> None:
-        self.route = route
         self.pydantic_model = pydantic_model
-
+        self.route = route
+        self.sqlalchemy_uri: URL = make_url(sqlalchemy_uri)
+        
     def to_dict(self):
         return {
             "route": self.route,
             "pydantic_model": self.pydantic_model,
+            "sqlalchemy_uri": self.sqlalchemy_uri
         }
 
 class HTTPMethod(Enum):
@@ -41,43 +44,57 @@ class HTTPMethod(Enum):
     @staticmethod
     def get_values():
         return [m.value for m in HTTPMethod]
+
 ### END Helper Classes and Functions ###
 
 class AutoApi:
 
-    def __init__(self, host, user, port, dialect, password=None):
+    def __init__(self, sqlalchemy_uris:str=None, host:str=None, user:str=None, port:Union[str,int]=None, dialect:str=None, password:str=None):
 
-        conn_info = {
-            "host":host,
-            "user":user,
-            "port":str(port),
-            "dialect":dialect
-        }
-        log.info(f"Attempting to connect to database. Connection info: {conn_info}")
-        if password is not None:
-            conn_info["password"] = password
-            log.info(f"Password set - {''.join(['x' for letter in password])}")
+        if sqlalchemy_uris:
+            if type(sqlalchemy_uris) != str:
+                raise ValueError("sqlalchemy_uris must be string of comma-separated SQLAlchemy URIs")
+            uris = sqlalchemy_uris.split(",")
         else:
-            log.info("No password set...")
-        
-        self.conn_info = conn_info
+            if None in [host,user,port,dialect]:
+                raise ValueError("If sqlalchemy_uris is None, host, user, port, and dialect must not be None")
 
-        if password is None:
-            self.base_connection_string = f"{dialect}://{user}@{host}:{port}"
-        else:
-            self.base_connection_string = f"{dialect}://{user}:{password}@{host}:{port}" 
+            conn_info = {
+                "host":host,
+                "user":user,
+                "port":str(port),
+                "dialect":dialect
+            }
+            log.info(f"Attempting to connect to database. Connection info: {conn_info}")
+            if password is not None:
+                conn_info["password"] = password
+                log.info(f"Password set - {''.join(['x' for letter in password])}")
+            else:
+                log.info("No password set...")
+            
+            self.conn_info = conn_info
 
-        self.engines = {} # Initialize empty dict to hold SQLAlchemy Engines. Will have one per connection  
+            if password is None:
+                uris = [f"{dialect}://{user}@{host}:{port}"]
+            else:
+                uris = [f"{dialect}://{user}:{password}@{host}:{port}"]
+
+        self.sqlalchemy_uris: list[URL] = []
+        for uri in uris:
+            self.sqlalchemy_uris.append(make_url(uri))
+
     
-    def get_database_names(self, exclude = ['jmx', 'memory', 'system', 'tpcds', 'tpch']): # database is referred to as "catalog" in trino
+    def get_database_names(self, uri, exclude = ['jmx', 'memory', 'system', 
+                                                'tpcds', 'tpch', 'template0', 'template1']): # database is referred to as "catalog" in trino
 
-        engine = create_engine(self.base_connection_string)
-        self.engines["base"] = engine
+        engine = create_engine(uri)
 
         dialect = engine.dialect.name.lower()
         
         if dialect in ["trino"]:
             get_db_statement = "SHOW CATALOGS"
+        elif dialect in ["postgresql"]:
+            get_db_statement = "SELECT datname FROM pg_database;"
         else:
             raise Exception(f"Dialect {dialect} not yet supported. A SQL statement to fetch available databases must be added")
         
@@ -89,38 +106,32 @@ class AutoApi:
         
         return catalogs
     
-    def get_schema_names(self, catalog, exclude=['default','information_schema']):
+    def get_schema_names(self, uri, database, exclude=['default','information_schema']):
         
-        engine = self.engines.get(catalog)
-        if engine is None:
-            engine = create_engine(self.base_connection_string + f"/{catalog}")
+        engine = create_engine(f"{uri}/{database}")
         insp = inspect(engine)
         schemas = insp.get_schema_names()
         schemas = [schema for schema in schemas if schema not in exclude]
         return schemas
     
-    def get_tables(self, catalog, schema, exclude=[]):
+    def get_tables(self, uri, database, schema, exclude=[]):
         
-        engine = self.engines.get(catalog)
-        if engine is None:
-            engine = create_engine(self.base_connection_string + f"/{catalog}")
+        engine = create_engine(f"{uri}/{database}")
         insp = inspect(engine)
         tables = insp.get_table_names(schema)
         tables = [table for table in tables if table not in exclude]
         return tables
     
-    def get_columns(self, catalog, schema, table):
+    def get_columns(self, uri, catalog, schema, table):
         
-        engine = self.engines.get(catalog)
-        if engine is None:
-            engine = create_engine(self.base_connection_string + f"/{catalog}")
+        engine = create_engine(f"{uri}/{catalog}")
         insp = inspect(engine)
         columns = insp.get_columns(schema=schema, table_name=table)
         return columns
     
-    def pydantic_from_table(self, catalog, schema, table):
+    def pydantic_from_table(self, uri:Union[str, URL], database:str, schema:str, table:str):
         
-        columns = self.get_columns(catalog,schema, table)
+        columns = self.get_columns(uri, database, schema, table)
         
         model_dict = {}
         
@@ -128,7 +139,6 @@ class AutoApi:
 
             col_name = col["name"]
             col_type = col["type"]
-            
             
             if isinstance(col_type, types.String):
                 model_dict[col_name] = (Optional[str],...)
@@ -151,25 +161,28 @@ class AutoApi:
 
         endpoint_configs = []
 
-        catalogs = self.get_database_names()
+        for uri in self.sqlalchemy_uris:
 
-        for catalog in catalogs:
-            schemas = self.get_schema_names(catalog)
+            databases = self.get_database_names(uri=uri)
 
-            for schema in schemas:
-                tables = self.get_tables(catalog, schema)
+            for database in databases:
+                schemas = self.get_schema_names(uri=uri, database=database)
 
-                for table in tables:
-                    try:
-                        pydantic_model = self.pydantic_from_table(catalog, schema, table)
-                        endpoint_config = EndpointConfig(
-                            route = f"/{catalog}/{schema}/{table}",
-                            pydantic_model = pydantic_model
-                        )
-                        endpoint_configs.append(endpoint_config)
-                    except Exception as e:
-                        log.error(f"Cannot create pydantic model for table {catalog}.{schema}.{table}.")
-                        log.error(e)
+                for schema in schemas:
+                    tables = self.get_tables(uri=uri, database=database, schema=schema)
+
+                    for table in tables:
+                        try:
+                            pydantic_model = self.pydantic_from_table(uri=uri, database=database, schema=schema, table=table)
+                            endpoint_config = EndpointConfig(
+                                route = f"/{uri.host}/{database}/{schema}/{table}",
+                                pydantic_model = pydantic_model,
+                                sqlalchemy_uri=uri
+                            )
+                            endpoint_configs.append(endpoint_config)
+                        except Exception as e:
+                            log.error(f"Cannot create pydantic model for table {database}.{schema}.{table} (SQLAlchemy connection URI = {uri}).")
+                            log.error(e)
         
         return endpoint_configs
     
@@ -197,28 +210,25 @@ class AutoApi:
             )
             def auto_api_function(limit: Optional[int] = 10):
 
-                catalog, schema, table = endpoint_config.route.strip("/").split("/")
+                _, database, schema, table_name = endpoint_config.route.strip("/").split("/")
                 
-                engine = self.engines.get(catalog)
-                if engine is None:
-                    engine = create_engine(self.base_connection_string + f"/{catalog}")
+                engine = create_engine(str(endpoint_config.sqlalchemy_uri) + f"/{database}")
                 if limit is None:
                     limit = 10
                 
                 table = Table(
-                    table,
+                    table_name,
                     MetaData(schema=schema),
                     autoload=True,
                     autoload_with=engine
                 )
 
-                conn = engine.connect()
-                cursor = conn.execute(select(table))
-                rows = cursor.fetchmany(limit)
-                col_names = list(cursor.keys())
-                response = [dict(zip(col_names, row)) for row in rows]
-                conn.close()
-                return response
+                with engine.connect() as conn:
+                    cursor = conn.execute(select(table))
+                    rows = cursor.fetchmany(limit)
+                    col_names = list(cursor.keys())
+                    response = [dict(zip(col_names, row)) for row in rows]
+                    return response
 
             return auto_api_function
                     
